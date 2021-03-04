@@ -14,18 +14,18 @@ tiles.geometry = tiles.path.apply(lambda x: utils.extent_from_filename(x))
 tiles = tiles.set_crs(2056)
 tiles.head()
 
-# extract samples
+# extract labels
 labels = gpd.read_file("data/road_type_samples.kml", driver='KML')
 labels.columns = labels.columns.str.lower()
 labels = labels[["name", "geometry"]].to_crs(2056)
 labels.geometry = labels.geometry.apply(lambda x: utils.extent_from_point(x))
 labels["path"] = labels.name.apply(
     lambda x: Path("data/labels/{}.jpeg".format(x)))
-labels.apply(lambda x: utils.extract_subset_file(tiles, x.geometry, x.path),
+labels.apply(lambda x: utils.sample_from_tiles(tiles, x.geometry, x.path),
              axis=1)
 
 labels["data"] = labels.geometry.apply(
-    lambda x: reshape_as_image(utils.extract_subset(tiles, x)))
+    lambda x: reshape_as_image(utils.sample_from_tiles(tiles, x)))
 
 f, ax = plt.subplots(3, 3, figsize=(20, 20))
 ax[0, 0].imshow(labels.data.iloc[0])
@@ -52,7 +52,7 @@ images.head()
 
 with Pool(None) as p:
     p.starmap(
-        utils.extract_subset_file,
+        utils.sample_from_tiles,
         zip([tiles] * images.shape[0], images.geometry.tolist(),
             images.path.tolist()))
 
