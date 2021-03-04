@@ -1,0 +1,5 @@
+data/
+geodata/
+output/
+
+__pycache__/
