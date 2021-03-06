@@ -7,27 +7,23 @@ from multiprocessing import Pool
 
 gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
 
-# extract labels
-labels = gpd.read_file("data/road_type_samples.kml", driver='KML')
-labels.columns = labels.columns.str.lower()
-labels = labels[["name", "geometry"]].to_crs(2056)
-labels.geometry = labels.geometry.apply(lambda x: utils.extent_from_point(x))
-labels["path"] = labels.name.apply(
-    lambda x: Path("data/labels/{}.jpeg".format(x)))
-labels["data"] = labels.apply(
-    lambda x: reshape_as_image(utils.sample_from_wms(x.geometry, path=x.path)),
-    axis=1)
+# extract road type examples
+examples = gpd.read_file("data/examples/road_types.kml", driver='KML')
+examples.columns = examples.columns.str.lower()
+examples = examples[["name", "geometry"]].to_crs(2056)
+examples.geometry = examples.geometry.apply(
+    lambda x: utils.extent_from_point(x))
+examples["path"] = examples.name.apply(
+    lambda x: Path("data/examples/{}.jpeg".format(x)))
+examples["data"] = examples.geometry.apply(lambda x: utils.sample_from_wms(x))
 
-f, ax = plt.subplots(3, 3, figsize=(20, 20))
-ax[0, 0].imshow(labels.data.iloc[0])
-ax[0, 1].imshow(labels.data.iloc[1])
-ax[0, 2].imshow(labels.data.iloc[2])
-ax[1, 0].imshow(labels.data.iloc[3])
-ax[1, 1].imshow(labels.data.iloc[4])
-ax[1, 2].imshow(labels.data.iloc[5])
-ax[2, 0].imshow(labels.data.iloc[6])
-ax[2, 1].imshow(labels.data.iloc[7])
-ax[2, 2].imshow(labels.data.iloc[8])
+# plot examples
+plt.figure(figsize=(10, 10))
+for i, row in examples.iterrows():
+    ax = plt.subplot(3, 3, i + 1)
+    plt.imshow(reshape_as_image(row.data))
+    plt.title(row['name'])
+    plt.axis("off")
 
 # list tiles and extract extent
 tiles = gpd.GeoDataFrame.from_dict(
@@ -37,9 +33,9 @@ tiles = tiles.set_crs(2056)
 tiles.head()
 
 # extract street images from points
-images = gpd.read_file("data/road_points_corrected.geojson")
+images = gpd.read_file("data/road_points.geojson")
 images = images[images.objektart != 9].append(
-    images[images.objektart == 9].iloc[::6, :])
+    images[images.objektart == 9].iloc[::6, :])  # balance classes
 images.geometry = images.geometry.apply(lambda x: utils.extent_from_point(x))
 images = images[images.geometry.within(tiles.dissolve().geometry.iloc[0])]
 images["path"] = images.apply(lambda x: Path("data/streets/{o}/{id}_{o}.jpeg".

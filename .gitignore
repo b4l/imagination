@@ -1,6 +1,7 @@
 streets/
-img_*/
 geodata/
-output/
+training*/
+checkpoint*/
+logs/
 
 __pycache__/
