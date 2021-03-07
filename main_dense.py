@@ -1,189 +1,107 @@
+import matplotlib.pyplot as plt
 import tensorflow as tf
-import numpy as np
-import os
-import random
-import imageio
-from pathlib import Path
-import ops
+import pathlib
+import densenet
 ''' Part of code from https://github.com/taki0112/Densenet-Tensorflow'''
 
 # Hyperparameter
 f_dim = 64
 nb_block = 5  # number of dense block
-init_learning_rate = 0.5 * 1e-4
+initial_learning_rate = 0.5 * 1e-4
 epsilon = 1e-8  # epsilon for AdamOptimizer
-batch_size = 32
-
-total_epochs = 100
-input_size = 256
 dropout_rate = 0.2
+epochs = 10
 
-# read img id and labels
-img_lst = list(Path('data/streets').glob('*/*.jpeg'))
-labels = [p.parts[-2] for p in img_lst]
-label_index = {l: i for i, l in enumerate(set(labels))}
-print('label_index:  ', label_index)
-class_num = len(label_index)
+# create dataset
+batch_size = 32
+img_height = 256
+img_width = 256
 
-train_ratio = 0.95
-train_imgslst = img_lst[0:int(len(img_lst) * train_ratio)]
-test_imgslst = img_lst[int(len(img_lst) * train_ratio):]
+data_dir = pathlib.Path('data/streets')
 
-x = tf.compat.v1.placeholder(tf.float32,
-                             shape=[None, input_size, input_size, 3])
-batch_images = tf.reshape(x, [-1, input_size, input_size, 3])
-label = tf.compat.v1.placeholder(tf.float32, shape=[None, class_num])
+train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2,
+    subset="training",
+    seed=8484,
+    image_size=(img_height, img_width),
+    batch_size=batch_size)
 
-learning_rate = tf.compat.v1.placeholder(tf.float32, name='learning_rate')
+val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    data_dir,
+    validation_split=0.2,
+    subset="validation",
+    seed=8484,
+    image_size=(img_height, img_width),
+    batch_size=batch_size)
 
-logits = ops.DenseNet(x=batch_images,
-                      nb_blocks=nb_block,
-                      filters=f_dim,
-                      class_num=class_num,
-                      dropout_rate=dropout_rate).model
-cost = tf.reduce_mean(input_tensor=tf.nn.softmax_cross_entropy_with_logits(
-    labels=tf.stop_gradient(label), logits=logits))
+class_names = train_ds.class_names
+class_num = len(class_names)
 
-optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate,
-                                             epsilon=epsilon)
-train = optimizer.minimize(cost)
+# configure dataset for performance
+AUTOTUNE = tf.data.AUTOTUNE
 
-correct_prediction = tf.equal(tf.argmax(input=logits, axis=1),
-                              tf.argmax(input=label, axis=1))
-accuracy = tf.reduce_mean(input_tensor=tf.cast(correct_prediction, tf.float32))
+train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
+val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 
-tf.compat.v1.summary.scalar('loss', cost)
-tf.compat.v1.summary.scalar('accuracy', accuracy)
+model = densenet.DenseNet(nb_block,
+                          class_num,
+                          f_dim,
+                          dropout_rate,
+                          input_shape=(img_height, img_width, 3))
 
-saver = tf.compat.v1.train.Saver(tf.compat.v1.global_variables())
+lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+    initial_learning_rate, decay_steps=100000, decay_rate=0.96, staircase=True)
 
-model_name = 'NET.model'
+# compile model
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule,
+                                       epsilon=epsilon),
+    loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=['accuracy'])
+model.summary()
 
-# create/restore checkpoint directory
-continue_from = None
-continue_from_iteration = None
-checkpoint_dir = 'checkpoint_dense_train_new'
-if not os.path.exists(checkpoint_dir):
-    os.makedirs(checkpoint_dir)
-runs = sorted(map(int, next(os.walk(checkpoint_dir))[1]))
-if len(runs) == 0:
-    run_nr = 0
+# save weights
+cp_dir = pathlib.Path("checkpoints/" + model.name)
+if cp_dir.exists():
+    runs = [p for p in cp_dir.iterdir() if p.is_dir]
+    last = sorted(runs)[-1].parts[-1] if len(runs) > 0 else 0
+    cp_dir = cp_dir.joinpath(str(int(last) + 1).zfill(3))
 else:
-    run_nr = runs[-1] + 1
-run_folder = str(run_nr).zfill(3)
+    cp_dir = cp_dir.joinpath(str(int(0) + 1).zfill(3))
+cp_dir.mkdir(parents=True, exist_ok=True)
 
-checkpoint_dir = os.path.join(checkpoint_dir, run_folder)
-if not os.path.exists(checkpoint_dir):
-    os.makedirs(checkpoint_dir)
-save_dir = checkpoint_dir
+checkpoint_path = str(cp_dir) + "/cp-{epoch:04d}.ckpt"
 
-# build up graph
-with tf.compat.v1.Session() as sess:
-    ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
-    if ckpt and tf.compat.v1.train.checkpoint_exists(
-            ckpt.model_checkpoint_path):
-        saver.restore(sess, ckpt.model_checkpoint_path)
-    else:
-        sess.run(tf.compat.v1.global_variables_initializer())
+cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
+                                                 save_weights_only=True,
+                                                 verbose=1)
 
-    if continue_from:
-        checkpoint_dir = os.path.join(os.path.dirname(checkpoint_dir),
-                                      continue_from)
-        print('Loading variables from ' + checkpoint_dir)
-        ops.load_checkpoint(sess, checkpoint_dir, continue_from_iteration,
-                            model_name)
-    if continue_from_iteration:
-        epoch_start = continue_from_iteration + 1
-    else:
-        epoch_start = 0
+# train model
+history = model.fit(train_ds,
+                    validation_data=val_ds,
+                    epochs=epochs,
+                    callbacks=[cp_callback])
 
-    merged = tf.compat.v1.summary.merge_all()
-    writer = tf.compat.v1.summary.FileWriter('./logs', sess.graph)
+# visualize
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
 
-    global_step = 0
+loss = history.history['loss']
+val_loss = history.history['val_loss']
 
-    for epoch in range(epoch_start, total_epochs):
+epochs_range = range(epochs)
 
-        epoch_learning_rate = init_learning_rate * (0.95**(epoch // 2))
+plt.figure(figsize=(8, 8))
+plt.subplot(1, 2, 1)
+plt.plot(epochs_range, acc, label='Training Accuracy')
+plt.plot(epochs_range, val_acc, label='Validation Accuracy')
+plt.legend(loc='lower right')
+plt.title('Training and Validation Accuracy')
 
-        total_batch = int(len(train_imgslst) / batch_size)
-        idx = random.sample(range(0, len(train_imgslst)), len(train_imgslst))
-
-        for step in range(total_batch):
-            batch_idx = idx[step * batch_size:(step + 1) * (batch_size)]
-            batch_x = []
-            batch_y = []
-
-            for ii in range(batch_size):
-                batch_img = imageio.imread(train_imgslst[batch_idx[ii]])
-                batch_x.append(batch_img)
-
-                label_vector = np.zeros(class_num)
-                img_class = train_imgslst[batch_idx[ii]].stem.split('_')[1]
-                label_vector[int(label_index[img_class])] = 1
-                batch_y.append(label_vector)
-
-            batch_img = np.array(batch_x)
-            batch_label = np.asarray(batch_y)
-
-            train_feed_dict = {
-                x: batch_img,
-                label: batch_label,
-                learning_rate: epoch_learning_rate
-            }
-
-            _, loss, train_accuracy = sess.run([train, cost, accuracy],
-                                               feed_dict=train_feed_dict)
-            print("Step:", str(global_step), "Loss:", loss,
-                  "Training accuracy:", train_accuracy)
-
-            global_step += 1
-
-        saver.save(sess,
-                   save_path=os.path.join(save_dir, model_name),
-                   global_step=epoch)
-
-        # randomly choose batch_size amount of images for validation
-        test_x = []
-        test_y = []
-        ti_idx = random.sample(range(0, len(test_imgslst)), batch_size)
-        for ti in range(batch_size):
-            test_x_tmp = imageio.imread(test_imgslst[ti_idx[ti]])
-            test_x.append(test_x_tmp)
-            label_vector = np.zeros(class_num)
-            img_class = test_imgslst[ti_idx[ti]].parts[-2]
-            label_vector[int(label_index[img_class])] = 1
-            test_y.append(label_vector)
-
-        test_feed_dict = {
-            x: test_x,
-            label: test_y,
-            learning_rate: epoch_learning_rate
-        }
-
-        accuracy_rates = sess.run(accuracy, feed_dict=test_feed_dict)
-        print('Epoch:', '%04d' % (epoch), '/ Accuracy =', accuracy_rates)
-
-        # compute test accuracy after 3 epochs
-        if epoch > 3:
-            accuracy_all = 0
-            for ti in range(len(test_imgslst)):
-                test_x = []
-                test_y = []
-                test_x_tmp = imageio.imread(test_imgslst[ti])
-                test_x.append(test_x_tmp)
-                label_vector = np.zeros(class_num)
-                img_class = test_imgslst[ti].parts[-2]
-                label_vector[int(label_index[img_class])] = 1
-                test_y.append(label_vector)
-
-                test_feed_dict = {
-                    x: test_x,
-                    label: test_y,
-                    learning_rate: epoch_learning_rate
-                }
-                accuracy_rates = sess.run(accuracy, feed_dict=test_feed_dict)
-                accuracy_all = accuracy_all + accuracy_rates
-
-            print('Epoch total:', '%04d' % (epoch), '/ Accuracy =',
-                  accuracy_all / int(len(test_imgslst)))
+plt.subplot(1, 2, 2)
+plt.plot(epochs_range, loss, label='Training Loss')
+plt.plot(epochs_range, val_loss, label='Validation Loss')
+plt.legend(loc='upper right')
+plt.title('Training and Validation Loss')
+plt.show()
